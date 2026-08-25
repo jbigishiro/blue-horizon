@@ -2,3 +2,4 @@ venv/
 .env
 __py
 cache__/
+data/
