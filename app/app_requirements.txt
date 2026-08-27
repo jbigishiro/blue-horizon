@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+slowapi
+sqlalchemy
+psycopg2-binary
+redis
+python-dotenv
+pandas
+openai
+llama-index-core
+llama-index-vector-stores-redis
+llama-index-embeddings-openai
+llama-index-llms-openai
+redisvl

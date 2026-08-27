@@ -3,3 +3,4 @@ venv/
 __py
 cache__/
 data/
+*.pyc

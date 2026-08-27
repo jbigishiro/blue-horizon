@@ -1,0 +1,36 @@
+# Render deployment config for the Blue Horizon FastAPI backend.
+#
+# Setup on render.com:
+#   1. New "Web Service" -> connect your GitHub repo
+#   2. Root directory: app/
+#   3. Render should auto-detect this render.yaml, or set manually:
+#        Build command: pip install -r requirements.txt
+#        Start command: uvicorn main:app --host 0.0.0.0 --port $PORT
+#   4. Add environment variables (see the checklist below) in the
+#      Render dashboard under Environment — do NOT commit real secrets
+#      into this repo.
+#
+# Required environment variables (set in Render's dashboard, not here):
+#   DATABASE_URL            - Neon Postgres connection string
+#   READONLY_DATABASE_URL   - read-only role connection string (see
+#                              create_readonly_role.sql) — falls back to
+#                              DATABASE_URL with a warning if unset
+#   REDIS_URL                - Redis Cloud / Upstash connection string
+#   OPENAI_API_KEY            - your OpenAI API key
+#   OPENAI_MODEL              - optional, defaults to gpt-4o
+#   OPENAI_ROUTER_MODEL       - optional, defaults to gpt-4o-mini
+#   FRONTEND_ORIGIN           - your deployed Streamlit URL, e.g.
+#                                https://your-app.streamlit.app
+#                                (leaving unset opens CORS to "*" with a
+#                                warning — fine for testing, not for
+#                                anything real)
+
+services:
+  - type: web
+    name: blue-horizon-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0

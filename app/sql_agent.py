@@ -1,26 +1,83 @@
+"""
+Text-to-SQL agent for Blue Horizon (OpenAI version).
+
+Flow:
+    natural language question
+        -> generate_sql()   (calls OpenAI, gets back one SELECT statement)
+        -> validate_sql()   (rejects anything unsafe or out-of-schema)
+        -> execute_sql()    (runs the validated query, returns rows)
+
+IMPORTANT — defense in depth:
+    validate_sql() is an application-level safety net, not the only line
+    of defense. Query execution uses a dedicated read-only Postgres role
+    (via READONLY_DATABASE_URL) when configured — see
+    create_readonly_role.sql to set this up. Without it, this module
+    prints a warning and falls back to the shared full-access
+    connection, which works for local development but should not be
+    relied on anywhere real: even a bug in validate_sql(), a clever
+    prompt injection, or a future change that weakens the checks below
+    should still not be able to modify data, and only a connection that
+    is physically incapable of writing guarantees that.
+
+Setup:
+    pip install openai
+    In .env: OPENAI_API_KEY=sk-...
+    Optional in .env: OPENAI_MODEL=gpt-4o   (defaults to gpt-4o if unset —
+        confirm this is still the model you want; OpenAI's lineup changes
+        over time, so check platform.openai.com/docs/models for the
+        current recommended model before shipping this anywhere real)
+
+Usage:
+    from sql_agent import ask
+
+    result = ask("How many rooms are currently available?")
+    print(result["sql"])       # the SQL that was generated and run
+    print(result["rows"])      # list of dicts, the query results
+"""
 
 import os
 import re
- 
+
 from openai import OpenAI
-from sqlalchemy import text
- 
-from db import engine
+from sqlalchemy import create_engine, text
+
+from db import engine as _default_engine
 from schema_context import build_schema_context, build_whitelists
- 
+
 client = OpenAI()  # reads OPENAI_API_KEY from the environment
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
- 
+
+# Use a dedicated read-only Postgres role for actually executing SQL,
+# if one's configured (see create_readonly_role.sql). This closes the
+# defense-in-depth gap flagged since this file was first written:
+# validate_sql() below is an application-level check, and application
+# code can have bugs. A connection that's PHYSICALLY incapable of
+# writing is what makes that gap actually closed rather than just
+# documented. Falls back to the shared engine (full read/write) with a
+# loud warning if READONLY_DATABASE_URL isn't set — so local dev still
+# works without extra setup, but the gap is visible, not silent.
+_readonly_url = os.environ.get("READONLY_DATABASE_URL")
+if _readonly_url:
+    _query_engine = create_engine(_readonly_url, pool_pre_ping=True)
+else:
+    print(
+        "[sql_agent] WARNING: READONLY_DATABASE_URL is not set — falling back "
+        "to the full read/write database connection for query execution. "
+        "See create_readonly_role.sql to set up a proper read-only role "
+        "before this goes anywhere near production."
+    )
+    _query_engine = _default_engine
+
 SCHEMA_CONTEXT = build_schema_context()
 ALLOWED_TABLES, ALLOWED_COLUMNS = build_whitelists()
- 
+
 DEFAULT_ROW_LIMIT = 200
- 
+
 SYSTEM_PROMPT = f"""You are a SQL generator for the Blue Horizon hotel database (Postgres).
- 
+
 Given a guest's or staff member's natural-language question, output exactly
 one SQL SELECT statement that answers it. Follow these rules strictly:
- 
+
 1. Output ONLY the SQL statement. No explanation, no markdown code fences,
    no preamble — just the raw SQL, ending in a semicolon.
 2. Only use SELECT. Never generate INSERT, UPDATE, DELETE, DROP, ALTER,
@@ -56,7 +113,7 @@ one SQL SELECT statement that answers it. Follow these rules strictly:
    though the data is technically correct. If the question is about a
    room's general/base price rather than a specific day, prefer
    rooms.base_rate or rooms.max_rate instead of room_availability.price.
- 
+
    Worked example — "list of standard rooms currently available":
        SELECT r.room_number, r.type, r.floor, r.bed_type, r.view_type,
               ra.price
@@ -70,11 +127,11 @@ one SQL SELECT statement that answers it. Follow these rules strictly:
    Notice this returns each qualifying ROOM once, not once per date —
    that is the correct shape for a "list of rooms" question. Follow
    this pattern for any similar request.
- 
+
 Schema:
 {SCHEMA_CONTEXT}
 """
- 
+
 # Blocks any statement containing these keywords, even if it technically
 # starts with SELECT (e.g. a SELECT that smuggles a subquery calling a
 # write operation, or multiple statements separated by a semicolon).
@@ -83,16 +140,16 @@ _FORBIDDEN_KEYWORDS = re.compile(
     r"EXECUTE|CALL|COPY|MERGE)\b",
     re.IGNORECASE,
 )
- 
- 
+
+
 class SQLGenerationError(Exception):
     """Raised when the LLM can't or won't produce a usable query."""
- 
- 
+
+
 class SQLValidationError(Exception):
     """Raised when generated SQL fails a safety or schema check."""
- 
- 
+
+
 def generate_sql(question: str) -> str:
     """Calls OpenAI to turn a natural-language question into one SQL SELECT."""
     response = client.chat.completions.create(
@@ -105,18 +162,18 @@ def generate_sql(question: str) -> str:
         ],
     )
     sql = (response.choices[0].message.content or "").strip()
- 
+
     if sql == "NO_QUERY_POSSIBLE" or not sql:
         raise SQLGenerationError(
             "This question can't be answered with the available data."
         )
- 
+
     # Strip markdown fences if the model adds them despite instructions.
     sql = re.sub(r"^```sql\s*|^```\s*|```$", "", sql, flags=re.MULTILINE).strip()
- 
+
     return sql
- 
- 
+
+
 def validate_sql(sql: str) -> str:
     """
     Validates generated SQL before execution. Raises SQLValidationError
@@ -124,21 +181,21 @@ def validate_sql(sql: str) -> str:
     SQL on success.
     """
     stripped = sql.strip().rstrip(";")
- 
+
     # Single statement only — reject anything with a semicolon in the
     # middle (which would allow a second, unvalidated statement to ride
     # along after the first).
     if ";" in stripped:
         raise SQLValidationError("Multiple statements are not allowed.")
- 
+
     if not re.match(r"^\s*SELECT\b", stripped, re.IGNORECASE):
         raise SQLValidationError("Only SELECT statements are allowed.")
- 
+
     if _FORBIDDEN_KEYWORDS.search(stripped):
         raise SQLValidationError(
             "Query contains a forbidden keyword (write/DDL operation)."
         )
- 
+
     # Table whitelist: every table name that appears after FROM or JOIN
     # must be one we actually have. This is a lightweight check, not a
     # full SQL parser — it catches invented or misspelled table names,
@@ -150,26 +207,28 @@ def validate_sql(sql: str) -> str:
     for t in referenced_tables:
         if t.lower() not in ALLOWED_TABLES:
             raise SQLValidationError(f"Unknown table referenced: '{t}'")
- 
+
     # Enforce a LIMIT if the model didn't include one.
     if not re.search(r"\bLIMIT\s+\d+", stripped, re.IGNORECASE):
         stripped = f"{stripped} LIMIT {DEFAULT_ROW_LIMIT}"
- 
+
     return stripped
- 
- 
+
+
 def execute_sql(sql: str) -> list[dict]:
-    """Runs a validated SELECT and returns rows as a list of dicts."""
-    with engine.connect() as conn:
+    """Runs a validated SELECT and returns rows as a list of dicts.
+    Uses _query_engine — the read-only connection when configured, see
+    the module-level setup above."""
+    with _query_engine.connect() as conn:
         result = conn.execute(text(sql))
         columns = result.keys()
         return [dict(zip(columns, row)) for row in result.fetchall()]
- 
- 
+
+
 def ask(question: str) -> dict:
     """
     End-to-end: question -> generated SQL -> validated SQL -> rows.
- 
+
     Returns a dict: {"sql": str, "rows": list[dict]}
     Raises SQLGenerationError or SQLValidationError on failure — callers
     should catch these and show the guest a friendly fallback message
@@ -179,12 +238,12 @@ def ask(question: str) -> dict:
     safe_sql = validate_sql(raw_sql)
     rows = execute_sql(safe_sql)
     return {"sql": safe_sql, "rows": rows}
- 
- 
+
+
 if __name__ == "__main__":
     # Quick manual test: python sql_agent.py
     import sys
- 
+
     q = " ".join(sys.argv[1:]) or "How many rooms do we have of each room type?"
     print(f"Question: {q}\n")
     try:
@@ -195,4 +254,3 @@ if __name__ == "__main__":
             print(row)
     except (SQLGenerationError, SQLValidationError) as e:
         print(f"Could not answer: {e}")
- 
