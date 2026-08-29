@@ -32,7 +32,13 @@ try:
 except Exception:
     _secrets_url = None  # no secrets.toml present — normal for local dev
 
-API_BASE_URL = "https://your-backend.onrender.com"
+API_BASE_URL = (_secrets_url or os.environ.get("API_BASE_URL", "http://localhost:8000")).rstrip("/")
+# .rstrip("/") matters: a trailing slash here (e.g. "...onrender.com/")
+# would make every request go to ".../onrender.com//chat" — a double
+# slash, which FastAPI treats as a genuinely different, non-existent
+# path and returns 404 for. This one invisible character is a very easy
+# mistake to make when copy-pasting a URL, so it's stripped here
+# defensively rather than relying on it never happening again.
 
 st.set_page_config(page_title="Blue Horizon Concierge", page_icon="🏨")
 
@@ -87,6 +93,7 @@ with st.sidebar:
         st.rerun()
 
     st.caption(f"Session: `{st.session_state.session_id[:8]}...`")
+    st.caption(f"Backend: `{API_BASE_URL}`")
 
 
 # --- Main chat area --------------------------------------------------
