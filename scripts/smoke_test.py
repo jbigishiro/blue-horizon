@@ -33,10 +33,10 @@ def check(name: str, condition: bool, detail: str = ""):
     results.append(condition)
 
 
-def chat(message: str, customer_id: int | None = TEST_CUSTOMER_ID) -> dict:
+def chat(message: str, customer_id: int | None = TEST_CUSTOMER_ID, session_id: str | None = None) -> dict:
     resp = requests.post(
         f"{BASE_URL}/chat",
-        json={"session_id": SESSION_ID, "message": message, "customer_id": customer_id},
+        json={"session_id": session_id or SESSION_ID, "message": message, "customer_id": customer_id},
         timeout=30,
     )
     resp.raise_for_status()
@@ -89,8 +89,18 @@ def main():
         check("Chitchat (OpenAI connectivity) works", False, str(e))
 
     # 5. Action flow: propose without login should be declined, not crash.
+    #    IMPORTANT: uses a FRESH session_id, not the shared SESSION_ID —
+    #    the shared session already has customer_id=1 attached from
+    #    checks 2-4 (a session remembers who's logged in across turns,
+    #    which is correct conversational behavior), so reusing it here
+    #    wouldn't actually simulate an unauthenticated guest at all.
     try:
-        result = chat("book me a standard room for tomorrow", customer_id=None)
+        fresh_session = f"smoke-test-unauth-{uuid.uuid4()}"
+        result = chat(
+            "book me a standard room for tomorrow",
+            customer_id=None,
+            session_id=fresh_session,
+        )
         check(
             "Unauthenticated booking is declined gracefully",
             "sign" in result["answer"].lower() or "log" in result["answer"].lower(),
